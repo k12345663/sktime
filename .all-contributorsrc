@@ -4264,6 +4264,16 @@
         "bug",
         "code"
       ]
+    },
+    {
+      "login": "k12345663",
+      "name": "Prathmesh Kolte",
+      "avatar_url": "https://avatars.githubusercontent.com/k12345663",
+      "profile": "https://github.com/k12345663",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ]
 }
