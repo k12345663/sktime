@@ -161,3 +161,55 @@ def test_arar_forecaster_airline_data():
 
     # Check that predictions are reasonable (positive for airline data)
     assert all(y_pred > 0)
+
+
+def _select_ar_lags_reference(gamma, max_ar_depth, max_lag):
+    """Loop-based reference for ``_select_ar_lags``, one lstsq per lag triple."""
+    best_sigma2, best_phi, best_lag = np.inf, np.zeros(4), (1, 0, 0, 0)
+    for i in range(2, max_ar_depth - 1):
+        for j in range(i + 1, max_ar_depth):
+            for k in range(j + 1, max_ar_depth + 1):
+                if k > max_lag:
+                    continue
+                A = np.full((4, 4), gamma[0])
+                A[0, 1] = A[1, 0] = gamma[i - 1]
+                A[0, 2] = A[2, 0] = gamma[j - 1]
+                A[1, 2] = A[2, 1] = gamma[j - i]
+                A[0, 3] = A[3, 0] = gamma[k - 1]
+                A[1, 3] = A[3, 1] = gamma[k - i]
+                A[2, 3] = A[3, 2] = gamma[k - j]
+                b = np.array([gamma[1], gamma[i], gamma[j], gamma[k]])
+                phi, *_ = np.linalg.lstsq(A, b, rcond=None)
+                sigma2 = float(gamma[0] - np.dot(phi, b))
+                if np.isfinite(sigma2) and sigma2 < best_sigma2:
+                    best_sigma2, best_phi, best_lag = sigma2, phi, (1, i, j, k)
+    return best_sigma2, best_phi, best_lag
+
+
+@pytest.mark.skipif(
+    not run_test_for_class(ARARForecaster),
+    reason="run test only if softdeps are present and incrementally (if requested)",
+)
+@pytest.mark.parametrize("n", [15, 40, 100, 500])
+@pytest.mark.parametrize("max_ar_depth, max_lag", [(4, 10), (13, 13), (26, 40)])
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_select_ar_lags_matches_loop_reference(n, max_ar_depth, max_lag, seed):
+    """Vectorized lag selection gives the same result as the loop-based search."""
+    from sktime.forecasting.arar._arar_forecaster import _select_ar_lags
+
+    rng = np.random.default_rng(seed)
+    x = rng.normal(size=n)
+    x = x - x.mean()
+    # biased autocovariances, as computed in _fit_arar
+    gamma = np.array(
+        [np.sum(x[: n - lag] * x[lag:]) / n if lag < n else 0.0 for lag in range(41)]
+    )
+
+    sigma2, phi, lag = _select_ar_lags(gamma, max_ar_depth, max_lag)
+    sigma2_ref, phi_ref, lag_ref = _select_ar_lags_reference(
+        gamma, max_ar_depth, max_lag
+    )
+
+    assert lag == lag_ref
+    np.testing.assert_allclose(sigma2, sigma2_ref, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(phi, phi_ref, rtol=1e-8, atol=1e-10)
