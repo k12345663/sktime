@@ -59,6 +59,83 @@ def _setup_params(y_in, max_ar_depth=None, max_lag=None):
     return max_ar_depth, max_lag
 
 
+def _select_ar_lags(gamma, max_ar_depth, max_lag):
+    """Select the best AR lags (1, i, j, k) by minimal innovation variance.
+
+    Solves the Yule-Walker equations for all lag combinations
+    1 < i < j < k <= max_ar_depth in one vectorized batch.
+
+    Parameters
+    ----------
+    gamma : np.ndarray of shape (max_lag + 1,)
+        Autocovariances of the memory-shortened, demeaned series.
+    max_ar_depth : int
+        Maximum AR lag to consider.
+    max_lag : int
+        Maximum lag for which autocovariances are available.
+
+    Returns
+    -------
+    best_sigma2 : float
+        Innovation variance of the best combination, ``np.inf`` if no
+        combination yields a finite variance.
+    best_phi : np.ndarray of shape (4,)
+        AR coefficients for lags (1, i, j, k).
+    best_lag : tuple of int
+        The selected lags (1, i, j, k).
+    """
+    best_sigma2 = np.inf
+    best_lag = (1, 0, 0, 0)
+    best_phi = np.zeros(4, dtype=float)
+
+    # Grid search over lag combinations 1 < i < j < k <= max_ar_depth,
+    # vectorized: all Yule-Walker systems are built and solved in one batch.
+    # Combinations are enumerated in the same order as a nested loop over
+    # i, j, k, so ties are resolved identically (first minimum wins).
+    lags = np.array(
+        [
+            (i, j, k)
+            for i in range(2, max_ar_depth - 1)
+            for j in range(i + 1, max_ar_depth)
+            for k in range(j + 1, max_ar_depth + 1)
+        ],
+        dtype=int,
+    ).reshape(-1, 3)
+    # keep only lag triples whose autocovariances are all available
+    lags = lags[lags[:, 2] <= max_lag]
+
+    if lags.shape[0] > 0:
+        i, j, k = lags[:, 0], lags[:, 1], lags[:, 2]
+
+        # A[n] is the 4x4 Yule-Walker matrix for lags (1, i, j, k)
+        A = np.empty((lags.shape[0], 4, 4), dtype=float)
+        A[:, [0, 1, 2, 3], [0, 1, 2, 3]] = gamma[0]
+        A[:, 0, 1] = A[:, 1, 0] = gamma[i - 1]
+        A[:, 0, 2] = A[:, 2, 0] = gamma[j - 1]
+        A[:, 1, 2] = A[:, 2, 1] = gamma[j - i]
+        A[:, 0, 3] = A[:, 3, 0] = gamma[k - 1]
+        A[:, 1, 3] = A[:, 3, 1] = gamma[k - i]
+        A[:, 2, 3] = A[:, 3, 2] = gamma[k - j]
+        b = np.stack([np.full(i.shape, gamma[1]), gamma[i], gamma[j], gamma[k]], 1)
+
+        # minimum-norm least squares solution, same as np.linalg.lstsq with
+        # rcond=None (singular values below 4 * eps * largest are discarded)
+        phis = np.einsum(
+            "nij,nj->ni", np.linalg.pinv(A, rcond=4 * np.finfo(float).eps), b
+        )
+        sigma2s = gamma[0] - np.einsum("ni,ni->n", phis, b)
+
+        # Accept any finite σ²
+        sigma2s = np.where(np.isfinite(sigma2s), sigma2s, np.inf)
+        best_idx = int(np.argmin(sigma2s))
+        if np.isfinite(sigma2s[best_idx]):
+            best_sigma2 = float(sigma2s[best_idx])
+            best_phi = phis[best_idx].astype(float, copy=True)
+            best_lag = (1, *(int(lag) for lag in lags[best_idx]))
+
+    return best_sigma2, best_phi, best_lag
+
+
 def _fit_arar(y_in, max_ar_depth=None, max_lag=None, safe=True):
     """Fit ARAR model to a 1D series.
 
@@ -186,40 +263,7 @@ def _fit_arar(y_in, max_ar_depth=None, max_lag=None, safe=True):
             else:
                 gamma[lag] = float(np.sum((X[: n - lag] - xbar) * (X[lag:] - xbar)) / n)
 
-        best_sigma2 = np.inf
-        best_lag = (1, 0, 0, 0)
-        best_phi = np.zeros(4, dtype=float)
-
-        def build_system(i, j, k):
-            """Build Yule-Walker system for given lags."""
-            needed = [0, i - 1, j - 1, k - 1, j - i, k - i, k - j, 1, i, j, k]
-            if any(idx < 0 or idx > max_lag for idx in needed):
-                return None, None
-            A = np.full((4, 4), gamma[0], dtype=float)  # diag = gamma[0]
-            A[0, 1] = A[1, 0] = gamma[i - 1]
-            A[0, 2] = A[2, 0] = gamma[j - 1]
-            A[1, 2] = A[2, 1] = gamma[j - i]
-            A[0, 3] = A[3, 0] = gamma[k - 1]
-            A[1, 3] = A[3, 1] = gamma[k - i]
-            A[2, 3] = A[3, 2] = gamma[k - j]
-            b = np.array([gamma[1], gamma[i], gamma[j], gamma[k]], dtype=float)
-            return A, b
-
-        # Grid search over lag combinations
-        for i in range(2, max_ar_depth - 1):
-            for j in range(i + 1, max_ar_depth):
-                for k in range(j + 1, max_ar_depth + 1):
-                    A, b = build_system(i, j, k)
-                    if A is None:
-                        continue
-                    phi, *_ = np.linalg.lstsq(A, b, rcond=None)
-                    sigma2 = float(gamma[0] - float(np.dot(phi, b)))
-
-                    # Accept any finite σ²
-                    if np.isfinite(sigma2) and sigma2 < best_sigma2:
-                        best_sigma2 = sigma2
-                        best_phi = phi.astype(float, copy=True)
-                        best_lag = (1, i, j, k)
+        best_sigma2, best_phi, best_lag = _select_ar_lags(gamma, max_ar_depth, max_lag)
 
         # Only fail if σ² is non-finite
         if not np.isfinite(best_sigma2):
