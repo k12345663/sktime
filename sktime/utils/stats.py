@@ -108,6 +108,9 @@ def _weighted_geometric_mean(y, weights=None, axis=None):
                     f"number of `weights` ({len(weights)})."
                 )
         weight_sums = np.sum(weights)
+        if axis == 0 and y.ndim == 2:
+            # NumPy aligns a 1D array with columns; axis=0 weights belong to rows.
+            weights = weights[:, np.newaxis]
     else:
         if y.shape != weights.shape:
             raise ValueError("Input data and weights have inconsistent shapes.")

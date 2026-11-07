@@ -14,6 +14,16 @@
   "skipCi": true,
   "contributors": [
     {
+      "login": "k12345663",
+      "name": "Prathmesh Kolte",
+      "avatar_url": "https://avatars.githubusercontent.com/u/179403494?v=4",
+      "profile": "https://github.com/k12345663",
+      "contributions": [
+        "bug",
+        "code"
+      ]
+    },
+    {
       "login": "fkiraly",
       "name": "Franz Kiraly",
       "avatar_url": "https://avatars1.githubusercontent.com/u/7985502?v=4",
